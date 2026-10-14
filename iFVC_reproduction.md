@@ -462,13 +462,172 @@ git status -sb
 
 服务器使用仓库专用的 GitHub Deploy Key 完成 SSH 推送。该密钥只授权当前 Fork，不授权用户的其他仓库。私钥保留在服务器，不进入仓库和复现文档。
 
-## 9. 后续待完成步骤
+## 9. VRU_gz 两帧数据准备
 
-- 已在用户的 GitHub 账号下创建 Fork：`https://github.com/usukforever/iFVC`；
-- 已确认 Fork 的默认分支为 `main`，基线提交为 `7fa3de2281c271b3f1e305aef8fb48e9b3ba2b10`；
-- 已将 Fork 克隆到服务器，把官方仓库配置为只读 `upstream`，并创建远程 `reproduction` 分支；
-- 准备数据集并验证每帧的 COLMAP 文件和图像目录；
-- 先完成第 0 帧和第 1 帧的最小闭环；
-- 扩展到短序列，再运行完整序列；
-- 汇总质量、大小、编解码速度和渲染速度；
-- 在另一台干净服务器上复验全文档。
+### 9.1 为什么先选择 VRU_gz
+
+三类官方数据都采用逐帧多视角图像和 COLMAP 相机模型，训练入口共用同一套读取逻辑。因此先完整跑通一个场景，比同时准备三套大数据更容易定位问题。本文选择 VRU Basketball 的 `gz` 场景：原始数据包含 34 路同步 MP4，每路为 1920×1080、25 FPS、250 帧；两帧闭环的存储与训练成本可控。
+
+原始视频保持不变，所有派生文件写入独立的 `prepared` 目录：
+
+```bash
+export IFVC_DATA_ROOT=/root/autodl-tmp/datasets/iFVC  # 按实际修改
+export VRU_VIDEO_DIR="$IFVC_DATA_ROOT/raw/VRU_Basketball/gz/videos"
+export VRU_SCENE_DIR="$IFVC_DATA_ROOT/prepared/VRU/Dataset/VRU_gz"
+```
+
+原始压缩包的 SHA-256 为：
+
+```text
+a0b9ea6a03e2b23539717db7b48cf2d1ec27223930b2bbb84ef3467ef1db33c8  VRU_gz.zip
+```
+
+实际归档包含相机编号 0–33 的 34 个视频。按 `llffhold=10` 划分后，编号 0、10、20、30 为测试视角，其余 30 个为训练视角。
+
+### 9.2 提取第 0 帧和第 1 帧
+
+下面的命令只读取原始 MP4，并要求目标目录不存在，防止新旧结果混合：
+
+```bash
+test -d "$VRU_VIDEO_DIR"
+test ! -e "$VRU_SCENE_DIR/frame000000"
+test ! -e "$VRU_SCENE_DIR/frame000001"
+mkdir -p "$VRU_SCENE_DIR/frame000000/inputs" "$VRU_SCENE_DIR/frame000001"
+
+mapfile -t VRU_VIDEOS < <(find "$VRU_VIDEO_DIR" -maxdepth 1 -type f -name '*.mp4' -print | sort -V)
+test "${#VRU_VIDEOS[@]}" -eq 34
+
+EXTRACT_TMP=$(mktemp -d "$VRU_SCENE_DIR/.extract.XXXXXX")
+trap 'rm -rf "$EXTRACT_TMP"' EXIT
+for VIDEO in "${VRU_VIDEOS[@]}"; do
+  CAMERA_ID=$(basename "$VIDEO" .mp4)
+  [[ "$CAMERA_ID" =~ ^[0-9]+$ ]]
+  printf -v CAMERA_NAME 'cam%02d.png' "$CAMERA_ID"
+  mkdir -p "$EXTRACT_TMP/$CAMERA_ID"
+  ffmpeg -hide_banner -loglevel error -i "$VIDEO" \
+    -vf "select='between(n,0,1)'" -vsync 0 -frames:v 2 -start_number 0 \
+    "$EXTRACT_TMP/$CAMERA_ID/frame%06d.png"
+  mv "$EXTRACT_TMP/$CAMERA_ID/frame000000.png" \
+    "$VRU_SCENE_DIR/frame000000/inputs/$CAMERA_NAME"
+  mv "$EXTRACT_TMP/$CAMERA_ID/frame000001.png" \
+    "$VRU_SCENE_DIR/frame000001/$CAMERA_NAME"
+done
+rm -rf "$EXTRACT_TMP"
+trap - EXIT
+
+test "$(find "$VRU_SCENE_DIR/frame000000/inputs" -maxdepth 1 -type f -name 'cam*.png' | wc -l)" -eq 34
+test "$(find "$VRU_SCENE_DIR/frame000001" -maxdepth 1 -type f -name 'cam*.png' | wc -l)" -eq 34
+```
+
+实际结果为两个目录各 34 张 1920×1080 PNG，文件名均为 `cam00.png` 至 `cam33.png`，原始 MP4 未被移动或修改。
+
+### 9.3 第 0 帧 COLMAP 标定
+
+iFVC README 要求按 3DGStream 准备数据。核对 3DGStream 提交 `747ddfef646edf3ea628f2bd13b7bedce7c5fe47` 后确认：`convert.py` 对第 0 帧执行 COLMAP，`convert_frames.py` 让后续帧复用第 0 帧相机模型；仓库不负责从 MP4 提取图像。
+
+Ubuntu 20.04 的 COLMAP 3.6 不支持 3DGStream 命令中的 `Mapper.ba_global_function_tolerance`，且本服务器的 COLMAP 未编译 CUDA。下面按相同处理链直接调用 COLMAP，只移除该可选阈值，并明确关闭 GPU 特征计算：
+
+```bash
+export FRAME0="$VRU_SCENE_DIR/frame000000"
+mkdir -p "$FRAME0/distorted/sparse"
+colmap feature_extractor \
+  --database_path "$FRAME0/distorted/database.db" \
+  --image_path "$FRAME0/inputs" \
+  --ImageReader.single_camera 1 --ImageReader.camera_model OPENCV \
+  --SiftExtraction.use_gpu 0
+colmap exhaustive_matcher \
+  --database_path "$FRAME0/distorted/database.db" --SiftMatching.use_gpu 0
+colmap mapper \
+  --database_path "$FRAME0/distorted/database.db" \
+  --image_path "$FRAME0/inputs" \
+  --output_path "$FRAME0/distorted/sparse"
+colmap image_undistorter \
+  --image_path "$FRAME0/inputs" \
+  --input_path "$FRAME0/distorted/sparse/0" \
+  --output_path "$FRAME0" --output_type COLMAP
+mkdir -p "$FRAME0/sparse/0"
+for FILE in cameras.bin images.bin points3D.bin; do
+  mv "$FRAME0/sparse/$FILE" "$FRAME0/sparse/0/$FILE"
+done
+```
+
+CPU exhaustive matching约 55 分钟，Mapper 约 17 分钟。最终 34/34 个相机注册成功，得到 32,914 个稀疏点，平均重投影误差为 0.700448 像素，去畸变图像为 34 张。
+
+### 9.4 第 1 帧复用相机模型
+
+3DGStream 的 `copy_cams.py` 会遍历所有 `frame*` 目录。如果源帧本身位于该目录中，它可能先删除源帧的 `sparse` 再尝试复制，因此本文直接执行其底层需要的操作：
+
+```bash
+export FRAME1="$VRU_SCENE_DIR/frame000001"
+test "$(find "$FRAME1" -maxdepth 1 -type f -name 'cam*.png' | wc -l)" -eq 34
+test ! -e "$FRAME1/images"
+test ! -e "$FRAME1/sparse"
+colmap image_undistorter \
+  --image_path "$FRAME1" \
+  --input_path "$FRAME0/distorted/sparse/0" \
+  --output_path "$FRAME1" --output_type COLMAP
+mkdir -p "$FRAME1/sparse/0"
+for FILE in cameras.bin images.bin points3D.bin; do
+  mv "$FRAME1/sparse/$FILE" "$FRAME1/sparse/0/$FILE"
+done
+```
+
+该步骤约 2 秒，生成 34 张去畸变图像，同时保留根目录下的 34 张原始 PNG。
+
+## 10. 评测权重必须显式预缓存
+
+VGG 文件不是 iFVC 模型权重。项目使用 VGG16 提取感知特征以计算 LPIPS；训练、编码和解码不依赖它们，但每帧评测会加载它们。若不预缓存，程序会在训练结束后隐式访问海外站点。
+
+```bash
+export TORCH_CHECKPOINT_DIR="${HOME}/.cache/torch/hub/checkpoints"
+mkdir -p "$TORCH_CHECKPOINT_DIR"
+
+aria2c --continue=true --max-connection-per-server=16 --split=16 \
+  --min-split-size=1M --file-allocation=none \
+  --dir="$TORCH_CHECKPOINT_DIR" --out='vgg16-397923af.pth.part' \
+  'https://hf-mirror.com/ByteDance/LatentSync-1.5/resolve/main/auxiliary/vgg16-397923af.pth'
+echo '397923af8e79cdbb6a7127f12361acd7a2f83e06b05044ddf496e83de57a5bf0  '"$TORCH_CHECKPOINT_DIR/vgg16-397923af.pth.part" | sha256sum --check
+mv "$TORCH_CHECKPOINT_DIR/vgg16-397923af.pth.part" \
+  "$TORCH_CHECKPOINT_DIR/vgg16-397923af.pth"
+
+curl -fL --retry 5 -o "$TORCH_CHECKPOINT_DIR/vgg.pth.part" \
+  'https://ghfast.top/https://raw.githubusercontent.com/richzhang/PerceptualSimilarity/master/lpips/weights/v0.1/vgg.pth'
+echo 'a78928a0af1e5f0fcb1f3b9e8f8c3a2a5a3de244d830ad5c1feddc79b8432868  '"$TORCH_CHECKPOINT_DIR/vgg.pth.part" | sha256sum --check
+mv "$TORCH_CHECKPOINT_DIR/vgg.pth.part" "$TORCH_CHECKPOINT_DIR/vgg.pth"
+```
+
+已验证文件分别为 553,433,881 字节和 7,289 字节。清华与华为常见的 `/pytorch/models/` 猜测路径实际返回 404，不应写入安装命令。
+
+## 11. RTX 4090、PyTorch 1.12 与动态 NVRTC 内核
+
+项目 CUDA 扩展可以用 `8.6+PTX` 在 RTX 4090 上运行，但 PyTorch 1.12 的 `Tensor.prod()` 会动态生成 NVRTC 归约内核。CUDA 11.6 不认识 `sm_89`，原始代码会在第一次训练迭代报架构错误。
+
+渲染器返回的 `scaling` 形状为 `[N, 3]`。本复现分支把 `scaling.prod(dim=1).mean()` 等价改为 `(scaling[:, 0] * scaling[:, 1] * scaling[:, 2]).mean()`。单元检查确认数值和梯度一致，修改后的两帧 CUDA 训练也已通过。这是硬件兼容修复，不改变损失函数定义。
+
+原仓库还直接导入 `colorama`，但未声明依赖。已验证版本为 `colorama==0.4.6`，并同步加入 `environment.yml` 与 `requirements-pypi-lock.txt`。
+
+## 12. 两帧完整短跑验证
+
+官方 VRU_gz 配置从 `frame_start=1` 开始，适用于已有第 0 帧模型的情况。本复现没有预训练权重，必须从第 0 帧开始。短跑使用第 0 帧 100 次、第 1 帧 20 次，并让 `P_frame_params.first_ref_iteration=100` 指向第 0 帧实际保存的迭代号。
+
+短跑未达到第 500 次统计和第 1500 次增密，指标只用于验证链路，不能与论文结果比较。RTX 4090 上的完整流程已以退出码 0 结束：
+
+```text
+第 0 帧：100 次训练约 5.0 秒；编码 3.81 秒；解码 3.50 秒
+第 0 帧：PSNR 16.7622；SSIM 0.7511；LPIPS 0.5126；位流约 1.9413 MB
+第 1 帧：20 次训练约 0.90 秒；NTC 编码 0.31 秒；解码 0.36 秒
+第 1 帧：PSNR 19.9915；SSIM 0.7844；LPIPS 0.4677；NTC 位流约 0.3977 MB
+两帧均值：PSNR 18.3769；SSIM 0.7678；LPIPS 0.4901
+```
+
+点云、检查点、NTC 参数、编码位流、渲染图像和 `frames_results.json` 均已生成，两帧派生输出约 111 MB。
+
+## 13. 当前结论与后续步骤
+
+环境、CUDA 扩展、VRU_gz 两帧数据，以及第 0 帧到第 1 帧的训练、编码、解码、渲染和评测闭环均已完成。后续仍需：
+
+- 用官方迭代数运行第 0 帧 30,000 次和第 1 帧 500 次；
+- 根据正式两帧结果估算完整 250 帧的时间与存储；
+- 汇总质量、模型大小、编解码时间和渲染速度；
+- 将实验日志提炼成类似 `starvla.md` 的简洁复现文档；
+- 在另一台干净服务器上按最终文档复验。
