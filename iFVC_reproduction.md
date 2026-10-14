@@ -8,6 +8,28 @@
 
 本项目没有需要下载的 iFVC 预训练 checkpoint。第 0 帧模型由数据现场训练产生，后续 P 帧依赖上一帧的解码模型。LPIPS 评测所需的网络参数属于指标依赖，将在评测部分单独说明，不作为 iFVC 模型权重介绍。
 
+### 1.1 文档使用约定
+
+本文面向第一次接触 iFVC 的读者。除明确标有“按实际修改”的变量外，已验证步骤应当可以按代码块从上到下复制执行。完成第 4 节的环境创建后，后续涉及 Python、Pip、编译和实验运行的命令都默认已经激活 `(iFVC)` Conda 环境；如果打开了新的终端，需要先执行 `conda activate iFVC`。
+
+项目目录、CUDA Toolkit、数据集、配置文件和实验输出目录会随服务器变化，不能藏在代码默认值或读者的当前工作目录中。本文采用以下规则：
+
+- 第一次用到某类路径时，先定义含义明确的环境变量，再检查目标确实存在；
+- 本次服务器的真实值作为可运行示例，并在变量行标注 `按实际修改`；
+- 后续命令只引用变量，不在多处重复写死绝对路径；
+- 如果原项目存在硬编码路径或隐式下载，先改成命令行参数、配置项或环境变量，再把验证后的调用方式写入本文；
+- 每个需要编译的组件都说明源码从哪里取得、源码位于哪里、产物安装到哪里，以及什么情况下需要重新编译。
+
+例如，本次服务器的项目路径写作：
+
+```bash
+export IFVC_ROOT=/root/autodl-tmp/iFVC  # 按实际修改：替换为自己的 Clone 目录
+test -d "$IFVC_ROOT/.git"
+cd "$IFVC_ROOT"
+```
+
+注释不会影响命令执行；如果 Clone 目录相同，这三行可以直接复制。如果目录不同，只改第一行即可。
+
 ## 2. 当前复现基线
 
 ### 2.1 这一步要回答什么问题
@@ -80,7 +102,15 @@ conda config --show channels
 
 直接让旧版 Conda 同时解析全部频道，会退回体积很大的完整索引，等待时间过长。后续命令应使用 `--override-channels`，只给当前步骤真正需要的镜像频道。这既缩短求解时间，也减少依赖来源的不确定性。
 
-清华 Conda 镜像当前没有提供本次需要的 `cudatoolkit=11.6`，因此 PyTorch 不再通过该 Conda 组合安装。下一步计划从阿里云 PyTorch wheel 镜像安装带 CUDA 11.6 运行时的 PyTorch 1.12.1。该方案尚未验证，不能作为最终命令。
+清华 Conda 镜像当前没有提供本次需要的 `cudatoolkit=11.6`，因此 PyTorch 不再通过该 Conda 组合安装，改用阿里云提供的 CUDA 11.6 wheel。
+
+同时给 pip 配置多个 `extra-index-url` 并不会让它测速后选择最快镜像。pip 会检查所有候选位置，再按版本和兼容性选择文件；慢索引可能拖累解析，最终下载位置也不由速度决定。本项目采用以下规则：
+
+- 普通 PyPI 依赖只使用阿里云主索引；
+- PyTorch 三件套使用阿里云的精确 wheel URL；
+- 阿里云缺少的预编译包使用项目官方的精确 URL，并在命令中单独说明；
+- 每条安装命令设置 `PIP_CONFIG_FILE=/dev/null`，避免用户已有 pip 配置加入未知默认源或备用源；
+- 清华、中科大和华为云只作为主源失败后的替代命令，不与主源同时参与正常解析。
 
 ## 4. 创建独立 Python 环境
 
@@ -107,27 +137,265 @@ conda create -n iFVC python=3.7.13 pip=22.3.1 -y \
 后续还需要执行以下检查，确认解释器和 Pip 版本准确无误：
 
 ```bash
-conda run -n iFVC python --version
-conda run -n iFVC python -m pip --version
+conda activate iFVC
+python --version
+python -m pip --version
 ```
 
-当前状态：环境创建成功，版本复查待执行。
+实际结果为 Python 3.7.13 和 pip 22.3.1，版本检查已经通过。后续命令均默认终端保持 `(iFVC)` 环境激活状态。
 
-## 5. RTX 4090 与 CUDA 11.6 的兼容处理
+## 5. 安装 PyTorch 1.12.1 与 CUDA 11.6 运行时
 
-RTX 4090 的计算能力为 8.9，而 CUDA 11.6 的 `nvcc` 不能原生生成 `sm_89`。NVIDIA 保证为同一主版本中较低计算能力生成的 cubin 可以在更高的次版本上运行，因此为 Ampere `sm_86` 编译的扩展可以在 Ada `sm_89` 上运行。
+### 5.1 为什么使用精确 wheel
+
+官方环境要求 PyTorch 1.12.1、TorchVision 0.13.1、TorchAudio 0.12.1 和 CUDA 11.6。直接让 pip 在多个索引中解析一个接近 2 GB 的 PyTorch 文件，速度和来源都不稳定。本次先从阿里云精确 URL 下载到仓库缓存目录，校验后再从本地安装。
+
+### 5.2 已验证命令
+
+```bash
+cd /root/autodl-tmp/iFVC
+conda activate iFVC
+mkdir -p .cache/wheels
+
+curl -fL --retry 5 \
+  -o '.cache/wheels/torch-1.12.1+cu116-cp37-cp37m-linux_x86_64.whl' \
+  'https://mirrors.aliyun.com/pytorch-wheels/cu116/torch-1.12.1%2Bcu116-cp37-cp37m-linux_x86_64.whl'
+
+curl -fL --retry 5 \
+  -o '.cache/wheels/torchvision-0.13.1+cu116-cp37-cp37m-linux_x86_64.whl' \
+  'https://mirrors.aliyun.com/pytorch-wheels/cu116/torchvision-0.13.1%2Bcu116-cp37-cp37m-linux_x86_64.whl'
+
+curl -fL --retry 5 \
+  -o '.cache/wheels/torchaudio-0.12.1+cu116-cp37-cp37m-linux_x86_64.whl' \
+  'https://mirrors.aliyun.com/pytorch-wheels/cu116/torchaudio-0.12.1%2Bcu116-cp37-cp37m-linux_x86_64.whl'
+
+sha256sum .cache/wheels/*.whl
+```
+
+三个已验证 SHA256 为：
+
+```text
+fc9b4786ec54be67eaa8b0c7c9999e2f4ae2b89a1c18e41de1515a190440c691  torch-1.12.1+cu116-cp37-cp37m-linux_x86_64.whl
+dcf32f6d998493e76ec21a38bbb856b7402295cf7a67fb09ce5bde7e7e725756  torchvision-0.13.1+cu116-cp37-cp37m-linux_x86_64.whl
+f19ef695ace19d5d9906d9efa5d9b9647862c84ff01f012943d5336688bffe6c  torchaudio-0.12.1+cu116-cp37-cp37m-linux_x86_64.whl
+```
+
+从本地 wheel 安装，普通间接依赖只允许从阿里云取得：
+
+```bash
+PIP_CONFIG_FILE=/dev/null \
+PIP_DISABLE_PIP_VERSION_CHECK=1 \
+python -m pip install \
+  --no-cache-dir \
+  --index-url https://mirrors.aliyun.com/pypi/simple/ \
+  '.cache/wheels/torch-1.12.1+cu116-cp37-cp37m-linux_x86_64.whl' \
+  '.cache/wheels/torchvision-0.13.1+cu116-cp37-cp37m-linux_x86_64.whl' \
+  '.cache/wheels/torchaudio-0.12.1+cu116-cp37-cp37m-linux_x86_64.whl'
+```
+
+### 5.3 实际结果
+
+```text
+torch: 1.12.1+cu116
+torchvision: 0.13.1+cu116
+torchaudio: 0.12.1+cu116
+torch CUDA runtime: 11.6
+CUDA available: True
+GPU: NVIDIA GeForce RTX 4090
+compute capability: (8, 9)
+GPU matrix test: (1024, 1024) passed
+```
+
+只有 `torch.cuda.is_available()` 为真还不够；上述矩阵乘法实际创建并执行了 CUDA 内核，因此能够证明当前 PyTorch wheel 可以在本机 RTX 4090 上运行。
+
+## 6. 安装普通 Python 依赖
+
+### 6.1 已验证命令
+
+作者仅固定了部分顶层依赖。为了避免 Python 3.7 环境在未来解析到不同版本，本次将实际验证过的顶层版本显式写入命令。`torch-scatter` 使用 PyG 官方提供的预编译 wheel，因为阿里云 PyPI 中没有与 PyTorch 1.12、CUDA 11.6 完全匹配的构建。
+
+```bash
+PIP_CONFIG_FILE=/dev/null \
+PIP_DISABLE_PIP_VERSION_CHECK=1 \
+python -m pip install \
+  --no-cache-dir \
+  --index-url https://mirrors.aliyun.com/pypi/simple/ \
+  plyfile==0.8.1 \
+  tqdm==4.66.5 \
+  einops==0.6.1 \
+  wandb==0.16.4 \
+  lpips==0.1.4 \
+  torchac==0.9.3 \
+  'https://data.pyg.org/whl/torch-1.12.0%2Bcu116/torch_scatter-2.1.0%2Bpt112cu116-cp37-cp37m-linux_x86_64.whl'
+```
+
+其中普通包及其间接依赖来自阿里云，只有命令中明确写出的 `torch-scatter` 来自 PyG 官方站点。
+
+### 6.2 已验证结果
+
+```text
+plyfile: 0.8.1
+tqdm: 4.66.5
+einops: 0.6.1
+wandb: 0.16.4
+lpips: 0.1.4
+torchac: 0.9.3
+torch-scatter: 2.1.0+pt112cu116
+torch-scatter GPU result: [3.0, 7.0]
+torch-scatter GPU test: passed
+```
+
+`python -m pip check` 的实际输出为 `No broken requirements found.`。自动解析出的关键间接依赖包括 NumPy 1.21.6、SciPy 1.7.3、Pillow 9.5.0、Requests 2.31.0、typing-extensions 4.7.1 和 protobuf 4.24.4。仓库中的 `requirements-pypi-lock.txt` 记录了本次完整验证过的 PyPI 依赖版本，但不包含 PyTorch、PyG wheel 和三个本地 CUDA 扩展；这几类依赖需要分别按本文的专用步骤安装，避免锁文件写入某台服务器的绝对路径。
+
+## 7. CUDA 版本关系与项目随附扩展
+
+### 7.1 三种 CUDA 版本的区别
+
+当前服务器的 NVIDIA 驱动为 550.100，`nvidia-smi` 显示 CUDA 12.4；这里的 12.4 是驱动能够兼容的最高 CUDA 版本，不是本项目实际使用的编译器。系统编译工具是 `/usr/local/cuda-11.6/bin/nvcc` 11.6.124，PyTorch wheel 自带的运行时也是 CUDA 11.6。
+
+普通 PyTorch 运算主要依赖 wheel 自带运行时；编译本项目三个 CUDA 扩展时则会调用系统 `nvcc`。系统 Toolkit 与 `torch.version.cuda` 同为 11.6，可以避免编译期版本不一致。
+
+### 7.2 RTX 4090 的编译架构
+
+RTX 4090 的计算能力为 8.9，而 CUDA 11.6 的 `nvcc` 不能原生生成 `sm_89`。如果让 PyTorch 自动采用检测到的计算能力，编译可能报 `Unsupported gpu architecture 'compute_89'`。本次要求 CUDA 11.6 同时生成 `sm_86` 二进制和 `compute_86` PTX，由新驱动在 RTX 4090 上兼容执行。
 
 编译 iFVC 的三个 CUDA 扩展时，需要显式设置：
 
 ```bash
-export TORCH_CUDA_ARCH_LIST="8.6"
+export TORCH_CUDA_ARCH_LIST="8.6+PTX"
 ```
 
-这样可以避免 PyTorch 自动检测到 8.9 后，要求 CUDA 11.6 的 `nvcc` 编译它不认识的 `sm_89`。这一结论还需要通过三个扩展的实际编译和最小 CUDA 运算共同验证。
+实际编译日志同时出现 `code=sm_86` 和 `code=compute_86`，三个扩展均完成 RTX 4090 CUDA 运算，因此该兼容方案已通过验证。
 
-## 6. Fork、Clone 与复现分支
+### 7.3 三个 ZIP 的来源和作用
 
-### 6.1 为什么同时需要 Fork 和 Clone
+仓库没有使用 Git submodule，而是在提交 `1c47bf320e7b772d3543be365928847846586213`（2025-04-15）中直接加入以下源码 ZIP。它们随 `git clone` 一起取得，不需要读者另找附件、从国外下载或手动上传：
+
+```text
+dcd7d0c3958a26ca797f63d4a0eaa18b390721ae48b20ca6d6afdd6b3acf5cff  submodules/diff-gaussian-rasterization.zip
+9441d51c2baf21e343b9818e916926e0a64566714190f5a9e5d561a6e460fb7f  submodules/gridencoder.zip
+9f13496dfee1f1643c8d9eaabce956acb06f9238bc73de2b9ce25f63edf8f070  submodules/simple-knn.zip
+```
+
+`diff-gaussian-rasterization` 负责可微高斯光栅化，并已在 ZIP 内包含 GLM；`simple-knn` 提供高斯点初始化所需的近邻 CUDA 运算；`gridencoder` 提供网格编码 CUDA 后端。仓库没有记录这些源码对应的上游 commit，因此复现时以 iFVC 提交号和 ZIP 的 SHA256 锁定内容，不猜测上游版本。
+
+这与 StarVLA 文档中的 flash-attn wheel 不同：flash-attn 是已经针对特定 Python、PyTorch 和 CUDA 编译好的二进制 wheel，上传后可直接安装；这里的三个 ZIP 是源码归档，必须先解压，再使用当前服务器的 PyTorch 和 CUDA Toolkit 编译。
+
+校验通过后解压，并排除 ZIP 中无用的 macOS 元数据：
+
+```bash
+cd "$IFVC_ROOT"
+
+unzip -q -o submodules/diff-gaussian-rasterization.zip \
+  -d submodules/ -x '__MACOSX/*'
+unzip -q -o submodules/simple-knn.zip \
+  -d submodules/ -x '__MACOSX/*'
+unzip -q -o submodules/gridencoder.zip \
+  -d submodules/ -x '__MACOSX/*'
+
+test -f submodules/diff-gaussian-rasterization/setup.py
+test -f submodules/simple-knn/setup.py
+test -f submodules/gridencoder/setup.py
+```
+
+三个 `test` 均无输出且整体退出码为 0，表示源码目录完整。
+
+### 7.4 显式确认项目与 CUDA 路径
+
+路径不能依赖读者的当前目录或某个隐藏默认值。进入服务器后先显式声明项目目录；下面是本次服务器的真实路径，其他服务器必须替换成自己的 Clone 目录：
+
+```bash
+export IFVC_ROOT=/root/autodl-tmp/iFVC  # 按实际修改：替换为自己的 Clone 目录
+test -d "$IFVC_ROOT/.git"
+cd "$IFVC_ROOT"
+```
+
+再定位 CUDA 编译器：
+
+```bash
+which nvcc
+readlink -f "$(which nvcc)"
+nvcc --version
+```
+
+如果 `which nvcc` 没有输出，可以检查常见安装目录：
+
+```bash
+find /usr/local -maxdepth 3 -type f -name nvcc
+```
+
+本服务器查到 `/usr/local/cuda-11.6/bin/nvcc`，所以 `CUDA_HOME` 是其上两级目录：
+
+```bash
+export CUDA_HOME=/usr/local/cuda-11.6  # 按实际修改：填写上一步查到的 CUDA Toolkit 根目录
+test -x "$CUDA_HOME/bin/nvcc"
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+```
+
+`CUDA_HOME` 必须指向真实存在且版本与 PyTorch CUDA runtime 匹配的 Toolkit 根目录，不能照抄一个不存在的默认路径。`MAX_JOBS` 只控制并行编译数，可以根据服务器 CPU 和内存调整；本次使用 8：
+
+```bash
+export TORCH_CUDA_ARCH_LIST="8.6+PTX"
+export MAX_JOBS=8
+```
+
+### 7.5 编译三个 CUDA 扩展
+
+先从阿里云安装 Ninja。Ninja 只负责并行调度编译任务，不改变生成结果：
+
+```bash
+PIP_CONFIG_FILE=/dev/null \
+PIP_DISABLE_PIP_VERSION_CHECK=1 \
+python -m pip install \
+  --no-cache-dir \
+  --index-url https://mirrors.aliyun.com/pypi/simple/ \
+  ninja==1.11.1.4
+```
+
+随后逐个编译项目随附源码。这里设置 `PIP_NO_INDEX=1`，确保本地构建不会查询 PyPI 或其他包索引；`--no-deps` 防止编译过程自动更改已经锁定的环境：
+
+```bash
+PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INDEX=1 \
+python -m pip install --verbose --no-cache-dir \
+  --no-build-isolation --no-deps \
+  ./submodules/simple-knn
+
+PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INDEX=1 \
+python -m pip install --verbose --no-cache-dir \
+  --no-build-isolation --no-deps \
+  ./submodules/diff-gaussian-rasterization
+
+PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INDEX=1 \
+python -m pip install --verbose --no-cache-dir \
+  --no-build-isolation --no-deps \
+  ./submodules/gridencoder
+```
+
+这三个目录分别来自仓库随附的同名 ZIP，而非运行时自动下载。编译完成的 `.so` 安装到当前 `iFVC` Conda 环境的 `site-packages`，因此每个环境只需编译一次。重新创建环境、更换 Python/PyTorch/CUDA、改变 GPU 架构或修改扩展源码后才需要重新编译；普通训练不需要重复执行本节。
+
+### 7.6 CUDA 扩展验证结果
+
+本次没有把“可以导入”作为唯一成功标准，而是分别执行了 CUDA 运算：
+
+```text
+simple-knn output shape: (1024,)
+simple-knn finite: True
+simple-knn GPU test: passed
+rasterizer visible shape: (2,)
+rasterizer CUDA test: passed
+gridencoder output shape: (32, 4)
+gridencoder input gradient finite: True
+gridencoder parameter gradient finite: True
+gridencoder CUDA test: passed
+No broken requirements found.
+```
+
+`torchac` 在首次导入时还会本地编译一个小型 C++ 后端，并缓存于 PyTorch extensions 缓存目录。缓存存在时后续训练直接复用；清空缓存或重建环境后会自动重新编译，但不需要从网络下载源码。
+
+## 8. Fork、Clone 与复现分支
+
+### 8.1 为什么同时需要 Fork 和 Clone
 
 Fork 在 GitHub 上建立用户拥有写权限的远程仓库，Clone 则把该仓库下载到云服务器。只 Clone 官方仓库无法把复现修改稳定保存到用户自己的 GitHub，因此本次流程先 Fork，再从 Fork Clone。
 
@@ -140,23 +408,28 @@ upstream  https://github.com/Pomelomm/iFVC.git
 
 `origin` 指向用户 Fork，用于拉取和推送；`upstream` 指向官方仓库，只用于读取官方更新。为了避免误推，已将 `upstream` 的 Push URL 设置为 `DISABLED`，并把当前仓库的默认推送目标固定为 `origin`。
 
-### 6.2 服务器代码目录
+### 8.2 服务器代码目录
 
-代码位于数据盘：
+代码位于数据盘。这里必须使用实际 Clone 路径，不应依赖读者登录后的默认目录：
 
 ```text
 /root/autodl-tmp/iFVC
 ```
 
-从 `/root` 进入并克隆仓库时使用：
+先集中设置代码存放目录和自己的 Fork 地址，再执行 Clone。以下是本次服务器的真实值；其他读者只需修改前两行：
 
 ```bash
-cd /root/autodl-tmp
-git clone https://github.com/usukforever/iFVC.git
-cd /root/autodl-tmp/iFVC
+export IFVC_WORKSPACE=/root/autodl-tmp  # 按实际修改：选择空间充足的持久化目录
+export IFVC_FORK_URL=https://github.com/usukforever/iFVC.git  # 按实际修改：替换为自己的 Fork 地址
+export IFVC_ROOT="$IFVC_WORKSPACE/iFVC"
+
+test -d "$IFVC_WORKSPACE"
+git clone "$IFVC_FORK_URL" "$IFVC_ROOT"
+test -d "$IFVC_ROOT/.git"
+cd "$IFVC_ROOT"
 ```
 
-### 6.3 配置官方仓库与安全推送目标
+### 8.3 配置官方仓库与安全推送目标
 
 ```bash
 git remote add upstream https://github.com/Pomelomm/iFVC.git
@@ -173,7 +446,7 @@ git remote -v
 
 成功时，`origin` 的 Fetch 和 Push 均指向用户 Fork，`upstream` 的 Fetch 指向官方仓库，而 Push 显示为 `DISABLED`。
 
-### 6.4 创建并推送复现分支
+### 8.4 创建并推送复现分支
 
 ```bash
 git switch -c reproduction
@@ -189,14 +462,11 @@ git status -sb
 
 服务器使用仓库专用的 GitHub Deploy Key 完成 SSH 推送。该密钥只授权当前 Fork，不授权用户的其他仓库。私钥保留在服务器，不进入仓库和复现文档。
 
-## 7. 后续待完成步骤
+## 9. 后续待完成步骤
 
 - 已在用户的 GitHub 账号下创建 Fork：`https://github.com/usukforever/iFVC`；
 - 已确认 Fork 的默认分支为 `main`，基线提交为 `7fa3de2281c271b3f1e305aef8fb48e9b3ba2b10`；
 - 已将 Fork 克隆到服务器，把官方仓库配置为只读 `upstream`，并创建远程 `reproduction` 分支；
-- 安装并验证 PyTorch 1.12.1、TorchVision 0.13.1 和 TorchAudio 0.12.1；
-- 安装普通 Python 依赖；
-- 编译并逐个导入三个 CUDA 扩展；
 - 准备数据集并验证每帧的 COLMAP 文件和图像目录；
 - 先完成第 0 帧和第 1 帧的最小闭环；
 - 扩展到短序列，再运行完整序列；
