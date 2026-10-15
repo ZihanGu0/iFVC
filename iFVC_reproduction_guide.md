@@ -1,15 +1,12 @@
-# iFVC 复现指南
-
-[https://ghfast.top/https://github.com/usukforever/iFVC/tree/reproduction](https://ghfast.top/https://github.com/usukforever/iFVC/tree/reproduction)
+# iFVC 代码仓库
+修改 `train_videos.py` 中一处计算，已上传到个人github仓库：[https://ghfast.top/https://github.com/usukforever/iFVC/tree/reproduction](https://ghfast.top/https://github.com/usukforever/iFVC/tree/reproduction)
 
 ## 1. 环境要求
-
 本文使用 CUDA Toolkit 11.6，并按官方环境选用 Ubuntu 20.04、GCC 9、Python 3.7.13 和 PyTorch 1.12.1+cu116。
 
 本文推荐选择 `Ubuntu 20.04 + CUDA 11.6` 的服务器镜像，减少旧版 Python、PyTorch、CUDA 扩展与系统编译器之间的额外差异。显卡驱动可以高于 CUDA 11.6，但服务器中必须提供 CUDA 11.6 的 `nvcc`。
 
 ## 2. 安装系统工具
-
 ```bash
 apt-get update
 apt-get install -y \
@@ -18,7 +15,6 @@ apt-get install -y \
 ```
 
 ## 3. 创建 Conda 环境
-
 将仓库的 `reproduction` 分支同步到服务器后，按实际位置设置项目、数据和输出目录：
 
 ```bash
@@ -51,9 +47,7 @@ conda activate iFVC
 ```
 
 ## 4. 安装 PyTorch 与 Python 依赖
-
 ### 4.1 安装 PyTorch 1.12.1+cu116
-
 ```bash
 cd "$IFVC_ROOT"
 mkdir -p .cache/wheels
@@ -80,7 +74,6 @@ python -m pip install --no-cache-dir \
 ```
 
 ### 4.2 安装其余依赖
-
 ```bash
 PIP_CONFIG_FILE=/dev/null \
 PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -95,7 +88,6 @@ python -m pip install --no-cache-dir --no-deps \
 ```
 
 ## 5. 编译项目 CUDA 扩展
-
 `submodules/` 中的三个扩展需要在当前 Conda 环境中编译一次。重建环境、修改 PyTorch 或 CUDA 版本、更换不同计算能力的 GPU 时，需要重新编译。
 
 本节要求系统 `nvcc` 为 CUDA 11.6（与 `torch.version.cuda` 一致）。若服务器没有 CUDA 11.6，先免安装取得 nvcc（conda 的 `cudatoolkit` 只含运行时库、不含 `nvcc`，不能用于编译）：
@@ -124,7 +116,7 @@ ln -sf ../nvvm/bin/cicc "$CUDA116/bin/cicc"
 export CUDA_HOME="$CUDA116"
 ```
 
-- 已有 CUDA 11.6 的服务器直接使用系统 `nvcc`，跳过上述块即可。
++ 已有 CUDA 11.6 的服务器直接使用系统 `nvcc`，跳过上述块即可。
 
 ```bash
 cd "$IFVC_ROOT"
@@ -164,9 +156,7 @@ python -m pip install --verbose --no-cache-dir \
 ```
 
 ## 6. 下载并准备 VRU_gz 数据
-
 ### 6.1 下载并解压原始视频
-
 ```bash
 mkdir -p "$IFVC_DATA_ROOT/raw/VRU_Basketball"
 cd "$IFVC_DATA_ROOT/raw/VRU_Basketball"
@@ -181,7 +171,6 @@ unzip -q Basketball_gz.zip -d gz
 ```
 
 ### 6.2 提取 250 帧
-
 原始视频保留在 `raw/`，训练数据写入 `prepared/`。
 
 ```bash
@@ -217,114 +206,27 @@ rm -rf "$EXTRACT_TMP"
 trap - EXIT
 ```
 
-### 6.3 标定第 0 帧
+### 6.3 标定相机、准备评测权重并生成配置
 
-```bash
-export FRAME0="$VRU_SCENE_DIR/frame000000"
-mkdir -p "$FRAME0/distorted/sparse"
-
-colmap feature_extractor \
-  --database_path "$FRAME0/distorted/database.db" \
-  --image_path "$FRAME0/inputs" \
-  --ImageReader.single_camera 1 \
-  --ImageReader.camera_model OPENCV \
-  --SiftExtraction.use_gpu 0
-
-colmap exhaustive_matcher \
-  --database_path "$FRAME0/distorted/database.db" \
-  --SiftMatching.use_gpu 0
-
-colmap mapper \
-  --database_path "$FRAME0/distorted/database.db" \
-  --image_path "$FRAME0/inputs" \
-  --output_path "$FRAME0/distorted/sparse"
-
-colmap image_undistorter \
-  --image_path "$FRAME0/inputs" \
-  --input_path "$FRAME0/distorted/sparse/0" \
-  --output_path "$FRAME0" \
-  --output_type COLMAP
-
-mkdir -p "$FRAME0/sparse/0"
-for FILE in cameras.bin images.bin points3D.bin; do
-  mv "$FRAME0/sparse/$FILE" "$FRAME0/sparse/0/$FILE"
-done
-```
-
-### 6.4 为后续帧复用相机模型
-
-```bash
-for FRAME_ID in $(seq 1 249); do
-  printf -v FRAME_NAME 'frame%06d' "$FRAME_ID"
-  FRAME_DIR="$VRU_SCENE_DIR/$FRAME_NAME"
-
-  colmap image_undistorter \
-    --image_path "$FRAME_DIR" \
-    --input_path "$FRAME0/distorted/sparse/0" \
-    --output_path "$FRAME_DIR" \
-    --output_type COLMAP
-
-  mkdir -p "$FRAME_DIR/sparse/0"
-  for FILE in cameras.bin images.bin points3D.bin; do
-    mv "$FRAME_DIR/sparse/$FILE" "$FRAME_DIR/sparse/0/$FILE"
-  done
-done
-```
-
-## 7. 准备 LPIPS 评测权重
-
-```bash
-export TORCH_CHECKPOINT_DIR="${HOME}/.cache/torch/hub/checkpoints"
-mkdir -p "$TORCH_CHECKPOINT_DIR"
-
-aria2c --continue=true --max-connection-per-server=16 --split=16 \
-  --min-split-size=1M --file-allocation=none \
-  --dir="$TORCH_CHECKPOINT_DIR" \
-  --out='vgg16-397923af.pth' \
-  'https://hf-mirror.com/ByteDance/LatentSync-1.5/resolve/main/auxiliary/vgg16-397923af.pth'
-
-curl -fL --retry 5 \
-  -o "$TORCH_CHECKPOINT_DIR/vgg.pth" \
-  'https://ghfast.top/https://raw.githubusercontent.com/richzhang/PerceptualSimilarity/master/lpips/weights/v0.1/vgg.pth'
-```
-
-## 8. 生成完整序列配置
+`scripts/prepare_vru_gz.sh` 会标定第 0 帧、为第 1–249 帧复用相机模型、准备 LPIPS 权重，并生成完整序列配置。
 
 ```bash
 cd "$IFVC_ROOT"
-mkdir -p .cache/configs
-
-python - "$IFVC_DATA_ROOT" "$IFVC_OUTPUT_ROOT" <<'PY'
-import json
-import os
-import sys
-
-data_root, output_root = sys.argv[1:]
-source = "configs/VRU/VRU_gz/VRU_gz_0.004_1.0.json"
-with open(source, "r") as f:
-    config = json.load(f)
-
-config["base_source_path"] = os.path.join(data_root, "prepared", "VRU", "Dataset")
-config["base_model_path"] = output_root
-config["frame_start"] = 0
-config["frame_end"] = 249
-config["Init_frame_params"]["iterations"] = 30000
-config["Init_frame_params"]["test_iterations"] = [30000]
-config["Init_frame_params"]["save_iterations"] = [30000]
-config["I_frame_params"]["iterations"] = 30000
-config["I_frame_params"]["test_iterations"] = [30000]
-config["I_frame_params"]["save_iterations"] = [30000]
-config["P_frame_params"]["iterations"] = 500
-config["P_frame_params"]["test_iterations"] = [500]
-config["P_frame_params"]["save_iterations"] = [500]
-
-with open(".cache/configs/VRU_gz_full.json", "w") as f:
-    json.dump(config, f, indent=2)
-PY
+bash scripts/prepare_vru_gz.sh all \
+  --data-root "$IFVC_DATA_ROOT" \
+  --output-root "$IFVC_OUTPUT_ROOT"
 ```
 
-## 9. 运行完整序列复现
+脚本使用的路径如下：
 
++ 输入数据：`$IFVC_DATA_ROOT/prepared/VRU/Dataset/VRU_gz`
++ LPIPS 权重：`$HOME/.cache/torch/hub/checkpoints`
++ 训练配置：`$IFVC_ROOT/.cache/configs/VRU_gz_full.json`
++ 训练输出：`$IFVC_OUTPUT_ROOT`
+
+需要单独重跑某一步时，将 `all` 换成 `colmap`、`weights` 或 `config`，其他参数不变。
+
+## 7. 运行完整序列复现
 ```bash
 cd "$IFVC_ROOT"
 mkdir -p "$IFVC_WORKSPACE/outputs"
@@ -337,8 +239,8 @@ echo "TRAIN_EXIT=$TRAIN_EXIT" | tee -a "$IFVC_OUTPUT_ROOT.log"
 ```
 
 
-## 10. 输出目录与结果
 
+## 8. 输出目录与结果
 ```bash
 export RESULT_DIR="$IFVC_OUTPUT_ROOT/VRU_gz/0.004_1.0"
 python -m json.tool "$RESULT_DIR/frames_results.json"
@@ -346,14 +248,14 @@ python -m json.tool "$RESULT_DIR/frames_results.json"
 
 输出目录中的主要产物如下：
 
-- `point_cloud/iteration_*`：模型检查点和点云；
-- `iteration_*/bitstreams`：压缩码流；
-- `test/ours_*/`：测试视角渲染图、参考图和误差图；
-- `results.json`：当前帧指标；
-- `frames_results.json`：完整序列汇总指标；
-- `outputs.log`：训练、编码、解码和评测日志。
++ `point_cloud/iteration_*`：模型检查点和点云；
++ `iteration_*/bitstreams`：压缩码流；
++ `test/ours_*/`：测试视角渲染图、参考图和误差图；
++ `results.json`：当前帧指标；
++ `frames_results.json`：完整序列汇总指标；
++ `outputs.log`：训练、编码、解码和评测日志。
 
-![iFVC 前两帧阶段性输出目录](assets/reproduction/ifvc_output_directory.png)
+<img src="assets/reproduction/ifvc_output_directory.png" alt="" title="null" crop="0,0,1,1" id="MPNrS" class="ne-image">
 
 码流大小应统计 `bitstreams` 中的文件。整个 `frame*` 目录还包含模型、点云和渲染图，不能作为压缩大小。
 
