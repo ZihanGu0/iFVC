@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ACTION="${1:-}"
 if [[ -z "$ACTION" ]]; then
-  echo "Usage: bash scripts/prepare_vru_gz.sh {all|colmap|weights|config} --data-root PATH --output-root PATH"
+  echo "Usage: bash scripts/prepare_vru_gz.sh {all|extract|colmap|weights|config} --data-root PATH --output-root PATH"
   exit 1
 fi
 shift
@@ -13,6 +13,7 @@ IFVC_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 DATA_ROOT="${IFVC_DATA_ROOT:-}"
 OUTPUT_ROOT="${IFVC_OUTPUT_ROOT:-}"
 SCENE_DIR="${VRU_SCENE_DIR:-}"
+VIDEO_DIR="${VRU_VIDEO_DIR:-}"
 CHECKPOINT_DIR="${TORCH_CHECKPOINT_DIR:-${HOME}/.cache/torch/hub/checkpoints}"
 
 while [[ $# -gt 0 ]]; do
@@ -29,6 +30,10 @@ while [[ $# -gt 0 ]]; do
       SCENE_DIR="$2"
       shift 2
       ;;
+    --video-dir)
+      VIDEO_DIR="$2"
+      shift 2
+      ;;
     --checkpoint-dir)
       CHECKPOINT_DIR="$2"
       shift 2
@@ -43,6 +48,9 @@ done
 if [[ -z "$SCENE_DIR" && -n "$DATA_ROOT" ]]; then
   SCENE_DIR="$DATA_ROOT/prepared/VRU/Dataset/VRU_gz"
 fi
+if [[ -z "$VIDEO_DIR" && -n "$DATA_ROOT" ]]; then
+  VIDEO_DIR="$DATA_ROOT/raw/VRU_Basketball/gz/videos"
+fi
 
 require_value() {
   local name="$1"
@@ -53,10 +61,76 @@ require_value() {
   fi
 }
 
+extract_frames() {
+  require_value "--data-root or --video-dir" "$VIDEO_DIR"
+  require_value "--data-root or --scene-dir" "$SCENE_DIR"
+
+  local -a videos
+  local extract_tmp video camera_id camera_name camera_complete
+  local frame_id frame_name frame_image_dir
+
+  mkdir -p "$SCENE_DIR"
+  mapfile -t videos < <(find "$VIDEO_DIR" -type f -name '*.mp4' -print | sort -V)
+  if [[ "${#videos[@]}" -eq 0 ]]; then
+    echo "No MP4 files found in $VIDEO_DIR"
+    exit 1
+  fi
+
+  extract_tmp=$(mktemp -d "$SCENE_DIR/.extract.XXXXXX")
+  trap 'rm -rf "$extract_tmp"' RETURN
+
+  for video in "${videos[@]}"; do
+    camera_id=$(basename "$video" .mp4)
+    printf -v camera_name 'cam%02d.png' "$((10#$camera_id))"
+    camera_complete=true
+
+    for frame_id in $(seq 0 249); do
+      printf -v frame_name 'frame%06d' "$frame_id"
+      if [[ "$frame_id" -eq 0 ]]; then
+        frame_image_dir="$SCENE_DIR/$frame_name/inputs"
+      else
+        frame_image_dir="$SCENE_DIR/$frame_name"
+      fi
+      if [[ ! -f "$frame_image_dir/$camera_name" ]]; then
+        camera_complete=false
+        break
+      fi
+    done
+
+    if [[ "$camera_complete" == true ]]; then
+      continue
+    fi
+
+    mkdir -p "$extract_tmp/$camera_id"
+    ffmpeg -hide_banner -loglevel error -i "$video" \
+      -vf "select='between(n,0,249)'" -vsync 0 -frames:v 250 -start_number 0 \
+      "$extract_tmp/$camera_id/frame%06d.png"
+
+    for frame_id in $(seq 0 249); do
+      printf -v frame_name 'frame%06d' "$frame_id"
+      if [[ "$frame_id" -eq 0 ]]; then
+        frame_image_dir="$SCENE_DIR/$frame_name/inputs"
+      else
+        frame_image_dir="$SCENE_DIR/$frame_name"
+      fi
+      mkdir -p "$frame_image_dir"
+      if [[ ! -f "$frame_image_dir/$camera_name" ]]; then
+        mv "$extract_tmp/$camera_id/$frame_name.png" \
+          "$frame_image_dir/$camera_name"
+      fi
+    done
+    rm -rf "$extract_tmp/$camera_id"
+  done
+
+  rm -rf "$extract_tmp"
+  trap - RETURN
+}
+
 prepare_colmap() {
   require_value "--data-root or --scene-dir" "$SCENE_DIR"
 
   local frame0="$SCENE_DIR/frame000000"
+  local frame_id frame_name frame_dir file
   mkdir -p "$frame0/distorted/sparse"
 
   if [[ ! -f "$frame0/sparse/0/cameras.bin" ]]; then
@@ -92,7 +166,7 @@ prepare_colmap() {
 
   for frame_id in $(seq 1 249); do
     printf -v frame_name 'frame%06d' "$frame_id"
-    local frame_dir="$SCENE_DIR/$frame_name"
+    frame_dir="$SCENE_DIR/$frame_name"
 
     if [[ -f "$frame_dir/sparse/0/cameras.bin" && -d "$frame_dir/images" ]]; then
       continue
@@ -171,9 +245,13 @@ PY
 
 case "$ACTION" in
   all)
+    extract_frames
     prepare_colmap
     prepare_weights
     prepare_config
+    ;;
+  extract)
+    extract_frames
     ;;
   colmap)
     prepare_colmap
@@ -186,7 +264,7 @@ case "$ACTION" in
     ;;
   *)
     echo "Unknown action: $ACTION"
-    echo "Use one of: all, colmap, weights, config"
+    echo "Use one of: all, extract, colmap, weights, config"
     exit 1
     ;;
 esac
