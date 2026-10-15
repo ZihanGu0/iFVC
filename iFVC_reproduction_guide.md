@@ -170,45 +170,9 @@ mkdir -p gz
 unzip -q Basketball_gz.zip -d gz
 ```
 
-### 6.2 提取 250 帧
-原始视频保留在 `raw/`，训练数据写入 `prepared/`。
+### 6.2 准备训练数据和配置
 
-```bash
-export VRU_VIDEO_DIR="$IFVC_DATA_ROOT/raw/VRU_Basketball/gz/videos"
-export VRU_SCENE_DIR="$IFVC_DATA_ROOT/prepared/VRU/Dataset/VRU_gz"
-
-mkdir -p "$VRU_SCENE_DIR"
-mapfile -t VRU_VIDEOS < <(find "$VRU_VIDEO_DIR" -type f -name '*.mp4' -print | sort -V)
-
-EXTRACT_TMP=$(mktemp -d "$VRU_SCENE_DIR/.extract.XXXXXX")
-trap 'rm -rf "$EXTRACT_TMP"' EXIT
-for VIDEO in "${VRU_VIDEOS[@]}"; do
-  CAMERA_ID=$(basename "$VIDEO" .mp4)
-  printf -v CAMERA_NAME 'cam%02d.png' "$((10#$CAMERA_ID))"
-  mkdir -p "$EXTRACT_TMP/$CAMERA_ID"
-  ffmpeg -hide_banner -loglevel error -i "$VIDEO" \
-    -vf "select='between(n,0,249)'" -vsync 0 -frames:v 250 -start_number 0 \
-    "$EXTRACT_TMP/$CAMERA_ID/frame%06d.png"
-
-  for FRAME_ID in $(seq 0 249); do
-    printf -v FRAME_NAME 'frame%06d' "$FRAME_ID"
-    if [ "$FRAME_ID" -eq 0 ]; then
-      FRAME_IMAGE_DIR="$VRU_SCENE_DIR/$FRAME_NAME/inputs"
-    else
-      FRAME_IMAGE_DIR="$VRU_SCENE_DIR/$FRAME_NAME"
-    fi
-    mkdir -p "$FRAME_IMAGE_DIR"
-    mv "$EXTRACT_TMP/$CAMERA_ID/$FRAME_NAME.png" \
-      "$FRAME_IMAGE_DIR/$CAMERA_NAME"
-  done
-done
-rm -rf "$EXTRACT_TMP"
-trap - EXIT
-```
-
-### 6.3 标定相机、准备评测权重并生成配置
-
-`scripts/prepare_vru_gz.sh` 会标定第 0 帧、为第 1–249 帧复用相机模型、准备 LPIPS 权重，并生成完整序列配置。
+`scripts/prepare_vru_gz.sh` 会从 34 路视频提取 250 帧、标定第 0 帧、为第 1–249 帧复用相机模型、准备 LPIPS 权重，并生成完整序列配置。
 
 ```bash
 cd "$IFVC_ROOT"
@@ -219,12 +183,13 @@ bash scripts/prepare_vru_gz.sh all \
 
 脚本使用的路径如下：
 
-+ 输入数据：`$IFVC_DATA_ROOT/prepared/VRU/Dataset/VRU_gz`
++ 原始视频：`$IFVC_DATA_ROOT/raw/VRU_Basketball/gz/videos`
++ 训练数据：`$IFVC_DATA_ROOT/prepared/VRU/Dataset/VRU_gz`
 + LPIPS 权重：`$HOME/.cache/torch/hub/checkpoints`
 + 训练配置：`$IFVC_ROOT/.cache/configs/VRU_gz_full.json`
 + 训练输出：`$IFVC_OUTPUT_ROOT`
 
-需要单独重跑某一步时，将 `all` 换成 `colmap`、`weights` 或 `config`，其他参数不变。
+需要单独重跑某一步时，将 `all` 换成 `extract`、`colmap`、`weights` 或 `config`，其他参数不变。
 
 ## 7. 运行完整序列复现
 ```bash
